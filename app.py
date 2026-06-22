@@ -203,6 +203,7 @@ def scan(dry_run=True, limit=None):
 # ---------- 到期提醒(纯云端,无OCR) ----------
 HR_CHAT_ID  = os.environ.get("HR_CHAT_ID", "oc_3bb2d20ed8c37cef6e0d05e027c42854")
 FRANKIE_OID = os.environ.get("FRANKIE_OPEN_ID", "ou_629ce01f4bc31de078e10fcb038dbf78")
+WU_OID      = os.environ.get("WU_OPEN_ID", "ou_c65fc5c31c650790db623640b7ac74f7")  # 吴晓丹 COO
 
 def _txt(v):
     if v is None: return ""
@@ -252,9 +253,10 @@ def remind(dry_run=True):
     lines += ["", "👉 处理: 在劳动合同台账更新续签状态/上传续签协议"]
     body = "\n".join(lines)
     if not dry_run:
-        send_msg(token, HR_CHAT_ID, "chat_id", body)
-        if p0:
-            send_msg(token, FRANKIE_OID, "open_id", body)
+        send_msg(token, HR_CHAT_ID, "chat_id", body)        # 人事及行政管理群(=人事部)
+        for oid in (WU_OID, FRANKIE_OID):                    # 吴晓丹 + 潘总, 每次都发
+            try: send_msg(token, oid, "open_id", body)
+            except Exception: pass
     return {"dry_run": dry_run, "count": len(items), "p0": p0, "preview": body}
 
 # ---------- 文件名日期解析(纯云端,无OCR) ----------
@@ -315,7 +317,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 4, "last": _LAST}
+    def health(): return {"ok": True, "v": 5, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
