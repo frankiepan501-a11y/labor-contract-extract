@@ -57,7 +57,7 @@ def update_row(token, record_id, fields):
     return _req("PUT", url, token, body={"fields": fields})
 
 # ---------- 渲染 + Qwen-VL ----------
-def render_images(pdf_bytes, max_pages=MAX_PAGES, dpi=140):
+def render_images(pdf_bytes, max_pages=MAX_PAGES, dpi=120):
     import fitz
     doc = fitz.open(stream=pdf_bytes, filetype="pdf")
     imgs = []
@@ -196,15 +196,34 @@ def scan(dry_run=True, limit=None):
     return {"dry_run": dry_run, "处理行数": n, "明细": report}
 
 # ---------- FastAPI ----------
+import threading
+_LOCK = threading.Lock()
+_LAST = {"ts": "", "result": None}
+
+def _bg_scan(limit):
+    if not _LOCK.acquire(blocking=False):
+        return
+    try:
+        r = scan(dry_run=False, limit=limit)
+        _LAST["result"] = {"处理行数": r["处理行数"]}
+    except Exception as ex:
+        _LAST["result"] = {"error": str(ex)}
+    finally:
+        _LOCK.release()
+
 try:
     from fastapi import FastAPI
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True}
+    def health(): return {"ok": True, "last": _LAST}
 
     @api.post("/scan")
-    def scan_ep(dry_run: bool = False, limit: int = 0):
+    def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
+        # bg=true: 后台线程跑(避开网关超时)，立即返回；cron 用这个
+        if bg and not dry_run:
+            threading.Thread(target=_bg_scan, args=(limit or None,), daemon=True).start()
+            return {"started": True}
         return scan(dry_run=dry_run, limit=limit or None)
 except Exception:
     api = None
