@@ -6,6 +6,7 @@ import os, io, json, base64, datetime, zoneinfo, urllib.request, urllib.parse
 FEISHU_APP_ID     = os.environ.get("FEISHU_APP_ID", "")
 FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
 DASHSCOPE_KEY     = os.environ.get("DASHSCOPE_KEY", "")
+DASHSCOPE_BASE    = os.environ.get("DASHSCOPE_BASE", "https://dashscope.aliyuncs.com")
 BASE_APP_TOKEN    = os.environ.get("CONTRACT_APP_TOKEN", "XDhxbyWQKazDw5s3OJoc7j7cnNh")
 TABLE_ID          = os.environ.get("CONTRACT_TABLE_ID", "tbliuozjqvEKT73F")
 MAX_PAGES         = int(os.environ.get("OCR_MAX_PAGES", "7"))
@@ -83,7 +84,7 @@ PROMPTS = {
 def qwen_extract(images, slot):
     content = [{"image": u} for u in images] + [{"text": PROMPTS[slot]}]
     body = {"model": "qwen-vl-max", "input": {"messages": [{"role": "user", "content": content}]}}
-    r = _req("POST", "https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation",
+    r = _req("POST", f"{DASHSCOPE_BASE}/api/v1/services/aigc/multimodal-generation/generation",
              token=DASHSCOPE_KEY, body=body)
     out = r["output"]["choices"][0]["message"]["content"]
     txt = out[0]["text"] if isinstance(out, list) else out
