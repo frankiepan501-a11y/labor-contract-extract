@@ -183,6 +183,10 @@ def scan(dry_run=True, limit=None):
                 except Exception as ex:
                     notes.append(f"[{slot} 解析失败:{ex}]")
         if not new_tokens:
+            if notes:  # 全部失败也写错误备注便于排查,但不记入解析记录(下轮重试)
+                report.append({"员工": name, "errors": notes})
+                if not dry_run:
+                    update_row(token, r["record_id"], {"备注": (" | ".join(notes))[:500]})
             continue
         if notes:
             merged["备注"] = (" | ".join(notes))[:2000]
@@ -205,7 +209,7 @@ def _bg_scan(limit):
         return
     try:
         r = scan(dry_run=False, limit=limit)
-        _LAST["result"] = {"处理行数": r["处理行数"]}
+        _LAST["result"] = {"处理行数": r["处理行数"], "明细": r.get("明细")}
     except Exception as ex:
         _LAST["result"] = {"error": str(ex)}
     finally:
@@ -216,7 +220,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "last": _LAST}
+    def health(): return {"ok": True, "v": 3, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
