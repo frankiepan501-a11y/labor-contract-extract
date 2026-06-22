@@ -200,6 +200,100 @@ def scan(dry_run=True, limit=None):
             break
     return {"dry_run": dry_run, "处理行数": n, "明细": report}
 
+# ---------- 到期提醒(纯云端,无OCR) ----------
+HR_CHAT_ID  = os.environ.get("HR_CHAT_ID", "oc_3bb2d20ed8c37cef6e0d05e027c42854")
+FRANKIE_OID = os.environ.get("FRANKIE_OPEN_ID", "ou_629ce01f4bc31de078e10fcb038dbf78")
+
+def _txt(v):
+    if v is None: return ""
+    if isinstance(v, list): return "".join((x.get("text", "") if isinstance(x, dict) else str(x)) for x in v)
+    if isinstance(v, dict): return v.get("text", "")
+    return str(v)
+
+def _days_left(due_ms):
+    today = datetime.datetime.now(TZ).date()
+    due = datetime.datetime.fromtimestamp(int(due_ms) / 1000, TZ).date()
+    return (due - today).days
+
+def send_msg(token, receive_id, id_type, text):
+    url = f"{FEISHU}/im/v1/messages?receive_id_type={id_type}"
+    return _req("POST", url, token, body={"receive_id": receive_id, "msg_type": "text",
+                                          "content": json.dumps({"text": text}, ensure_ascii=False)})
+
+def remind(dry_run=True):
+    token = feishu_token()
+    rows = list_rows(token)
+    items = []
+    for r in rows:
+        f = r["fields"]
+        if _txt(f.get("员工状态")) == "离职" or _txt(f.get("合同类型")) == "无固定期限":
+            continue
+        due = f.get("续签协议到期日期") or f.get("合同到期日期")
+        if not due:
+            continue
+        d = _days_left(due)
+        if d > 60:
+            continue
+        items.append({"name": _txt(f.get("员工姓名")), "job": _txt(f.get("职务(飞书人事·真相源)")),
+                      "due": int(due), "days": d, "coop": _txt(f.get("续签状态"))})
+    items.sort(key=lambda x: x["days"])
+    if not items:
+        return {"dry_run": dry_run, "count": 0, "note": "无60天内到期合同,不发提醒"}
+    p0 = any(x["days"] <= 7 for x in items)
+    emoji, lvl = ("🔴", "P0") if p0 else ("🟠", "P1")
+    lines = [f"{emoji} [HR·{lvl}] 劳动合同到期提醒 · {len(items)}份待处理", ""]
+    for x in items:
+        due_s = datetime.datetime.fromtimestamp(x["due"] / 1000, TZ).strftime("%Y/%m/%d")
+        if x["days"] < 0:   flag = f"⚠️已超期{-x['days']}天"
+        elif x["days"] <= 7:  flag = f"🔴剩{x['days']}天"
+        elif x["days"] <= 30: flag = f"🟠剩{x['days']}天"
+        else:                 flag = f"剩{x['days']}天"
+        lines.append(f"• {x['name']}（{x['job']}）到期{due_s} · {flag} · 续签状态:{x['coop'] or '待提醒'}")
+    lines += ["", "👉 处理: 在劳动合同台账更新续签状态/上传续签协议"]
+    body = "\n".join(lines)
+    if not dry_run:
+        send_msg(token, HR_CHAT_ID, "chat_id", body)
+        if p0:
+            send_msg(token, FRANKIE_OID, "open_id", body)
+    return {"dry_run": dry_run, "count": len(items), "p0": p0, "preview": body}
+
+# ---------- 文件名日期解析(纯云端,无OCR) ----------
+import re
+_DATE_RANGE = re.compile(r"(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})\D{0,3}(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})")
+
+def parse_filenames(dry_run=True):
+    token = feishu_token()
+    rows = list_rows(token)
+    out = []
+    for r in rows:
+        f = r["fields"]
+        if f.get("合同到期日期"):
+            continue  # 已有到期日,不覆盖
+        names = []
+        for slot in ("转正劳动合同附件", "试用期劳动合同附件"):
+            for a in (f.get(slot) or []):
+                if a.get("name"): names.append(a["name"])
+        hit = None
+        for nm in names:
+            m = _DATE_RANGE.search(nm)
+            if m:
+                y1, m1, d1, y2, m2, d2 = (int(x) for x in m.groups())
+                try:
+                    s = int(datetime.datetime(y1, m1, d1, tzinfo=TZ).timestamp() * 1000)
+                    e = int(datetime.datetime(y2, m2, d2, tzinfo=TZ).timestamp() * 1000)
+                    hit = (s, e, nm); break
+                except Exception:
+                    pass
+        if not hit:
+            continue
+        s, e, nm = hit
+        fields = {"合同开始日期": s, "合同到期日期": e,
+                  "备注": f"【文件名解析】起止日取自附件名「{nm}」,请人事核对"}
+        out.append({"员工": _txt(f.get("员工姓名")), "fields": fields})
+        if not dry_run:
+            update_row(token, r["record_id"], fields)
+    return {"dry_run": dry_run, "filled": len(out), "detail": out}
+
 # ---------- FastAPI ----------
 import threading
 _LOCK = threading.Lock()
@@ -221,15 +315,23 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 3, "last": _LAST}
+    def health(): return {"ok": True, "v": 4, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
-        # bg=true: 后台线程跑(避开网关超时)，立即返回；cron 用这个
+        # (OCR, 当前未用) bg=true 后台线程
         if bg and not dry_run:
             threading.Thread(target=_bg_scan, args=(limit or None,), daemon=True).start()
             return {"started": True}
         return scan(dry_run=dry_run, limit=limit or None)
+
+    @api.post("/remind")
+    def remind_ep(dry_run: bool = False):
+        return remind(dry_run=dry_run)
+
+    @api.post("/parse-filenames")
+    def parse_ep(dry_run: bool = False):
+        return parse_filenames(dry_run=dry_run)
 except Exception:
     api = None
 
