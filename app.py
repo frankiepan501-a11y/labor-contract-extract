@@ -261,6 +261,36 @@ def remind(dry_run=True):
             except Exception: pass
     return {"dry_run": dry_run, "count": len(items), "p0": p0, "preview": body}
 
+# ---------- 离职自动同步(通讯录,纯云端,无OCR) ----------
+def get_user(token, open_id):
+    try:
+        return _req("GET", f"{FEISHU}/contact/v3/users/{open_id}?user_id_type=open_id", token).get("data", {}).get("user", {})
+    except Exception:
+        return None
+
+def sync_departures(dry_run=True):
+    token = feishu_token()
+    rows = list_rows(token)
+    out = []
+    for r in rows:
+        f = r["fields"]
+        if _txt(f.get("员工状态")) == "离职":
+            continue
+        pf = f.get("员工(飞书账号)")
+        oid = (pf[0].get("id") or pf[0].get("open_id")) if isinstance(pf, list) and pf else None
+        if not oid:
+            continue
+        u = get_user(token, oid)
+        if not u:
+            continue
+        st = u.get("status") or {}
+        if st.get("is_resigned") or st.get("is_exited"):  # 仅显式离职才标,避免误判
+            name = _txt(f.get("员工姓名"))
+            out.append({"员工": name})
+            if not dry_run:
+                update_row(token, r["record_id"], {"员工状态": "离职", "续签状态": "已离职终止"})
+    return {"dry_run": dry_run, "marked_resigned": len(out), "detail": out}
+
 # ---------- 文件名日期解析(纯云端,无OCR) ----------
 import re
 _DATE_RANGE = re.compile(r"(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})\D{0,3}(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})")
@@ -319,7 +349,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 6, "last": _LAST}
+    def health(): return {"ok": True, "v": 7, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
@@ -336,6 +366,10 @@ try:
     @api.post("/parse-filenames")
     def parse_ep(dry_run: bool = False):
         return parse_filenames(dry_run=dry_run)
+
+    @api.post("/sync-departures")
+    def sync_dep_ep(dry_run: bool = False):
+        return sync_departures(dry_run=dry_run)
 except Exception:
     api = None
 
