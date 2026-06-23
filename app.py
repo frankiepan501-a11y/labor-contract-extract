@@ -291,6 +291,42 @@ def sync_departures(dry_run=True):
                 update_row(token, r["record_id"], {"员工状态": "离职", "续签状态": "已离职终止"})
     return {"dry_run": dry_run, "marked_resigned": len(out), "detail": out}
 
+# ---------- 状态自动同步: 离职(通讯录) + 试用/转正(按附件槽,无OCR) ----------
+def sync_status(dry_run=True):
+    token = feishu_token()
+    rows = list_rows(token)
+    out = []
+    for r in rows:
+        f = r["fields"]
+        cur = _txt(f.get("员工状态"))
+        name = _txt(f.get("员工姓名"))
+        # 1) 离职(通讯录, 最高优先)
+        pf = f.get("员工(飞书账号)")
+        oid = (pf[0].get("id") or pf[0].get("open_id")) if isinstance(pf, list) and pf else None
+        resigned = False
+        if oid:
+            u = get_user(token, oid)
+            if u:
+                st = u.get("status") or {}
+                resigned = bool(st.get("is_resigned") or st.get("is_exited"))
+        target, extra = None, {}
+        if resigned:
+            if cur != "离职":
+                target, extra = "离职", {"续签状态": "已离职终止"}
+        else:
+            has_reg = bool(f.get("转正劳动合同附件"))   # 转正合同槽有件
+            has_pro = bool(f.get("试用期劳动合同附件"))  # 试用合同槽有件
+            if has_reg and cur != "转正":
+                target = "转正"          # 有转正合同=转正(只升不降, 两个都传也=转正)
+            elif has_pro and not cur:
+                target = "试用期"        # 仅当状态空才用试用填, 不覆盖人事手填
+        if target:
+            fields = {"员工状态": target}; fields.update(extra)
+            out.append({"员工": name, "改为": target})
+            if not dry_run:
+                update_row(token, r["record_id"], fields)
+    return {"dry_run": dry_run, "changed": len(out), "detail": out}
+
 # ---------- 文件名日期解析(纯云端,无OCR) ----------
 import re
 _DATE_RANGE = re.compile(r"(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})\D{0,3}(\d{4})[.\-/年](\d{1,2})[.\-/月](\d{1,2})")
@@ -349,7 +385,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 7, "last": _LAST}
+    def health(): return {"ok": True, "v": 8, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
@@ -370,6 +406,10 @@ try:
     @api.post("/sync-departures")
     def sync_dep_ep(dry_run: bool = False):
         return sync_departures(dry_run=dry_run)
+
+    @api.post("/sync-status")
+    def sync_status_ep(dry_run: bool = False):
+        return sync_status(dry_run=dry_run)
 except Exception:
     api = None
 
