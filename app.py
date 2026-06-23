@@ -385,15 +385,14 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 8, "last": _LAST}
+    def health(): return {"ok": True, "v": 9, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
-        # (OCR, 当前未用) bg=true 后台线程
-        if bg and not dry_run:
-            threading.Thread(target=_bg_scan, args=(limit or None,), daemon=True).start()
-            return {"started": True}
-        return scan(dry_run=dry_run, limit=limit or None)
+        # OCR 抽取已永久停用(DashScope 跨境写超时)。员工状态改由 /sync-status 按附件槽自动判定,
+        # 到期日/底薪等由人事手填。保留代码备查,但端点不再执行,以免误触发往备注写报错。
+        return {"disabled": True,
+                "note": "OCR 抽取已停用; 员工状态走 /sync-status(按附件槽), 关键字段人事手填"}
 
     @api.post("/remind")
     def remind_ep(dry_run: bool = False):
