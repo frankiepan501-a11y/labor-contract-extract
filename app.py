@@ -222,44 +222,58 @@ def send_msg(token, receive_id, id_type, text):
     return _req("POST", url, token, body={"receive_id": receive_id, "msg_type": "text",
                                           "content": json.dumps({"text": text}, ensure_ascii=False)})
 
+PROBATION_LEAD = int(os.environ.get("PROBATION_LEAD_DAYS", "15"))  # 试用期到期前X天提醒转正评估
+
 def remind(dry_run=True):
     token = feishu_token()
     rows = list_rows(token)
-    items = []
+    items, prob = [], []
     for r in rows:
         f = r["fields"]
-        if _txt(f.get("员工状态")) == "离职" or _txt(f.get("合同类型")) == "无固定期限":
+        status = _txt(f.get("员工状态"))
+        if status == "离职":
             continue
-        due = f.get("续签协议到期日期") or f.get("合同到期日期")
-        if not due:
-            continue
-        d = _days_left(due)
-        if d > 60:
-            continue
-        items.append({"name": _txt(f.get("员工姓名")), "job": _txt(f.get("职务(飞书人事·真相源)")),
-                      "due": int(due), "days": d, "coop": _txt(f.get("续签状态"))})
-    items.sort(key=lambda x: x["days"])
-    if not items:
-        return {"dry_run": dry_run, "count": 0, "note": "无60天内到期合同,不发提醒"}
-    p0 = any(x["days"] <= 7 for x in items)
+        name = _txt(f.get("员工姓名")); job = _txt(f.get("职务(飞书人事·真相源)"))
+        # 合同到期(续签到期优先, 无固定期限跳过)
+        if _txt(f.get("合同类型")) != "无固定期限":
+            due = f.get("续签协议到期日期") or f.get("合同到期日期")
+            if due and _days_left(due) <= 60:
+                items.append({"name": name, "job": job, "due": int(due),
+                              "days": _days_left(due), "coop": _txt(f.get("续签状态"))})
+        # 试用期满 → 转正评估
+        if status == "试用期":
+            pe = f.get("试用期到期日")
+            if pe and _days_left(pe) <= PROBATION_LEAD:
+                prob.append({"name": name, "job": job, "pe": int(pe), "days": _days_left(pe)})
+    items.sort(key=lambda x: x["days"]); prob.sort(key=lambda x: x["days"])
+    if not items and not prob:
+        return {"dry_run": dry_run, "count": 0, "note": "无待提醒项"}
+    p0 = any(x["days"] <= 7 for x in items) or any(x["days"] <= 3 for x in prob)
     emoji, lvl = ("🔴", "P0") if p0 else ("🟠", "P1")
-    lines = [f"{emoji} [HR·{lvl}] 劳动合同到期提醒 · {len(items)}份待处理", ""]
-    for x in items:
-        due_s = datetime.datetime.fromtimestamp(x["due"] / 1000, TZ).strftime("%Y/%m/%d")
-        if x["days"] < 0:   flag = f"⚠️已超期{-x['days']}天"
-        elif x["days"] <= 7:  flag = f"🔴剩{x['days']}天"
-        elif x["days"] <= 30: flag = f"🟠剩{x['days']}天"
-        else:                 flag = f"剩{x['days']}天"
-        lines.append(f"• {x['name']}（{x['job']}）到期{due_s} · {flag} · 续签状态:{x['coop'] or '待提醒'}")
-    lines += ["", "👉 处理: 在劳动合同台账更新续签状态/上传续签协议"]
+    lines = [f"{emoji} [HR·{lvl}] 劳动合同提醒 · 合同到期{len(items)}/转正评估{len(prob)}"]
+    if items:
+        lines += ["", "【合同到期】"]
+        for x in items:
+            due_s = datetime.datetime.fromtimestamp(x["due"]/1000, TZ).strftime("%Y/%m/%d")
+            flag = (f"⚠️已超期{-x['days']}天" if x["days"]<0 else f"🔴剩{x['days']}天" if x["days"]<=7
+                    else f"🟠剩{x['days']}天" if x["days"]<=30 else f"剩{x['days']}天")
+            lines.append(f"• {x['name']}（{x['job']}）到期{due_s} · {flag} · 续签状态:{x['coop'] or '待提醒'}")
+    if prob:
+        lines += ["", "【试用期满·待转正评估】"]
+        for x in prob:
+            pe_s = datetime.datetime.fromtimestamp(x["pe"]/1000, TZ).strftime("%Y/%m/%d")
+            flag = (f"⚠️已过期{-x['days']}天未转正" if x["days"]<0 else f"🔴剩{x['days']}天" if x["days"]<=3
+                    else f"剩{x['days']}天")
+            lines.append(f"• {x['name']}（{x['job']}）试用期{pe_s}满 · {flag} · 请走转正评估")
+    lines += ["", "👉 到期→更新续签状态/传续签协议; 转正→走转正流程+传转正合同(状态自动转正)"]
     body = "\n".join(lines)
     if not dry_run:
-        try: send_msg(token, HR_CHAT_ID, "chat_id", body)    # 人事群(需bot在群,best-effort)
+        try: send_msg(token, HR_CHAT_ID, "chat_id", body)
         except Exception: pass
-        for oid in (GAO_OID, WU_OID, FRANKIE_OID):           # 高泳昭(人事)+吴晓丹+潘总 私聊,可靠
+        for oid in (GAO_OID, WU_OID, FRANKIE_OID):
             try: send_msg(token, oid, "open_id", body)
             except Exception: pass
-    return {"dry_run": dry_run, "count": len(items), "p0": p0, "preview": body}
+    return {"dry_run": dry_run, "count": len(items), "probation": len(prob), "p0": p0, "preview": body}
 
 # ---------- 离职自动同步(通讯录,纯云端,无OCR) ----------
 def get_user(token, open_id):
@@ -385,7 +399,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 9, "last": _LAST}
+    def health(): return {"ok": True, "v": 10, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
