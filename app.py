@@ -19,6 +19,17 @@ SLOT_PROBATION = "试用期劳动合同附件"
 SLOT_REGULAR   = "转正劳动合同附件"
 SLOT_RENEWAL   = "续签协议附件"
 EXTRACT_SLOTS  = [SLOT_PROBATION, SLOT_REGULAR, SLOT_RENEWAL]
+SLOT_DEPARTURE_CERT = "离职证明附件"
+SLOT_DEPARTURE_APPLICATION = "离职申请表附件"
+SLOT_TERMINATION_AGREEMENT = "解除/辞退协议附件"
+DEPARTURE_SECONDARY_SLOTS = [SLOT_DEPARTURE_APPLICATION, SLOT_TERMINATION_AGREEMENT]
+SINGLE_SELECT_FIELDS = {
+    "AI核对状态",
+    "员工状态",
+    "合同主体(签订公司)",
+    "合同类型",
+    "续签状态",
+}
 
 # ---------- HTTP ----------
 def _req(method, url, token=None, body=None, raw=False):
@@ -56,6 +67,15 @@ def download_media(token, file_token):
 def update_row(token, record_id, fields):
     url = f"{FEISHU}/bitable/v1/apps/{BASE_APP_TOKEN}/tables/{TABLE_ID}/records/{record_id}"
     return _req("PUT", url, token, body={"fields": fields})
+
+def update_row_stable(token, record_id, fields):
+    """Bitable single-select fields can be flaky in mixed PUTs; write them last."""
+    normal = {k: v for k, v in fields.items() if k not in SINGLE_SELECT_FIELDS}
+    selects = {k: v for k, v in fields.items() if k in SINGLE_SELECT_FIELDS}
+    if normal:
+        update_row(token, record_id, normal)
+    if selects:
+        update_row(token, record_id, selects)
 
 # ---------- 渲染 + Qwen-VL ----------
 def render_images(pdf_bytes, max_pages=MAX_PAGES, dpi=120):
@@ -152,6 +172,12 @@ def _att_list(row_fields, slot):
     v = row_fields.get(slot)
     return v if isinstance(v, list) else []
 
+def _has_conservative_departure_docs(row_fields):
+    """HR-approved rule: departure certificate plus one formal departure form/agreement."""
+    has_cert = bool(_att_list(row_fields, SLOT_DEPARTURE_CERT))
+    has_secondary = any(bool(_att_list(row_fields, slot)) for slot in DEPARTURE_SECONDARY_SLOTS)
+    return has_cert and has_secondary
+
 def scan(dry_run=True, limit=None):
     token = feishu_token()
     rows = list_rows(token)
@@ -209,7 +235,12 @@ GAO_OID     = os.environ.get("GAO_OPEN_ID", "ou_11db79f2fe86a26cdccb0b6997059648
 def _txt(v):
     if v is None: return ""
     if isinstance(v, list): return "".join((x.get("text", "") if isinstance(x, dict) else str(x)) for x in v)
-    if isinstance(v, dict): return v.get("text", "")
+    if isinstance(v, dict):
+        if isinstance(v.get("value"), list) and v["value"]:
+            first = v["value"][0]
+            if isinstance(first, dict):
+                return first.get("text") or first.get("name") or ""
+        return v.get("text", "") or v.get("name", "")
     return str(v)
 
 def _days_left(due_ms):
@@ -323,22 +354,31 @@ def sync_status(dry_run=True):
             if u:
                 st = u.get("status") or {}
                 resigned = bool(st.get("is_resigned") or st.get("is_exited"))
-        target, extra = None, {}
+        target, extra, reason = None, {}, ""
         if resigned:
             if cur != "离职":
                 target, extra = "离职", {"续签状态": "已离职终止"}
+                reason = "飞书通讯录已离职"
         else:
-            has_reg = bool(f.get("转正劳动合同附件"))   # 转正合同槽有件
-            has_pro = bool(f.get("试用期劳动合同附件"))  # 试用合同槽有件
-            if has_reg and cur != "转正":
+            has_departure_docs = _has_conservative_departure_docs(f)
+            has_reg = bool(f.get("转正劳动合同附件"))       # 转正合同槽有件
+            has_pro = bool(f.get("试用期劳动合同附件"))      # 试用合同槽有件
+            if has_departure_docs and cur != "离职":
+                target, extra = "离职", {"续签状态": "已离职终止"}
+                reason = "离职证明+离职申请/解除协议附件"
+            elif cur == "离职":
+                pass  # 离职是终态,不能因历史转正/试用附件被降级回在职状态。
+            elif has_reg and cur != "转正":
                 target = "转正"          # 有转正合同=转正(只升不降, 两个都传也=转正)
+                reason = "转正劳动合同附件"
             elif has_pro and not cur:
                 target = "试用期"        # 仅当状态空才用试用填, 不覆盖人事手填
+                reason = "试用期劳动合同附件"
         if target:
             fields = {"员工状态": target}; fields.update(extra)
-            out.append({"员工": name, "改为": target})
+            out.append({"员工": name, "改为": target, "来源": reason})
             if not dry_run:
-                update_row(token, r["record_id"], fields)
+                update_row_stable(token, r["record_id"], fields)
     return {"dry_run": dry_run, "changed": len(out), "detail": out}
 
 # ---------- 文件名日期解析(纯云端,无OCR) ----------
@@ -399,7 +439,7 @@ try:
     api = FastAPI(title="labor-contract-extract")
 
     @api.get("/health")
-    def health(): return {"ok": True, "v": 10, "last": _LAST}
+    def health(): return {"ok": True, "v": 11, "last": _LAST}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
