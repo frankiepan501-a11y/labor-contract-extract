@@ -1,11 +1,12 @@
 # labor-contract-extract
 
-劳动合同 OCR 抽取服务。扫描飞书「劳动合同台账」中新上传的合同附件，用 Qwen-VL OCR 提取关键字段并回填（标记"待核对"）。全云端，不依赖本地。
+人事行政专属后端。当前生产职责是劳动合同状态同步、到期提醒，以及“人事行政助手”的卡片长连接回调。历史 OCR 端点已停用。
 
 ## 端点
 - `GET /health`
-- `POST /scan?dry_run=true` — 只返回将回填的字段，不写表（验证用）
-- `POST /scan` — 真回填（dry_run 默认 false）；可选 `?limit=N`
+- `POST /sync-status?dry_run=true` — 只预览员工状态变化
+- `POST /remind?dry_run=true` — 只预览到期提醒与收件人解析，不发消息
+- `POST /scan` — 已禁用，不再做云端 OCR
 
 ## 规则（按附件槽路由）
 - 试用期劳动合同附件 → 签约公司/职称/起止/期限/试用期到期/底薪 → 员工状态=试用期
@@ -15,9 +16,12 @@
 - 幂等：已解析的 file_token 记录在「_解析记录(系统)」，不重复解析
 
 ## 环境变量
-- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（聪哥1号，台账协作者）
+- `HR_FEISHU_APP_ID` / `HR_FEISHU_APP_SECRET`（人事行政助手；只放 Zeabur 密钥环境）
+- `FEISHU_APP_ID` / `FEISHU_APP_SECRET`（保留旧 App 凭据，仅供 R7/R8 观察期一键回退）
 - `DASHSCOPE_KEY`（通义千问 Qwen-VL）
 - `CONTRACT_APP_TOKEN` / `CONTRACT_TABLE_ID`（默认已指向劳动合同台账）
 - `OCR_MAX_PAGES`（默认 7）
+- `REMINDER_RECIPIENT_NAMES`（默认仅高泳昭、吴晓丹、潘志聪；从当前 App 读取的人员字段解析 open_id）
+- `HR_CARD_ACTIONS`（默认只允许 `hr_r7_verify`）
 
-由 n8n 每小时 cron 调 `POST /scan`。
+由 n8n 每日 09:30 BJ 依次调用 `/sync-status` 与 `/remind`。卡片回调使用官方 `lark-channel-sdk` 常驻长连接，拒绝非 `hr_` 或未列入允许清单的动作。

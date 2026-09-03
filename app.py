@@ -3,8 +3,10 @@
 """
 import os, io, json, base64, datetime, zoneinfo, urllib.request, urllib.parse
 
-FEISHU_APP_ID     = os.environ.get("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = os.environ.get("FEISHU_APP_SECRET", "")
+# R7 uses dedicated variables so the legacy credentials remain intact for
+# one-step rollback during the observation window.
+FEISHU_APP_ID = os.environ.get("HR_FEISHU_APP_ID") or os.environ.get("FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.environ.get("HR_FEISHU_APP_SECRET") or os.environ.get("FEISHU_APP_SECRET", "")
 DASHSCOPE_KEY     = os.environ.get("DASHSCOPE_KEY", "")
 DASHSCOPE_BASE    = os.environ.get("DASHSCOPE_BASE", "https://dashscope.aliyuncs.com")
 BASE_APP_TOKEN    = os.environ.get("CONTRACT_APP_TOKEN", "XDhxbyWQKazDw5s3OJoc7j7cnNh")
@@ -227,10 +229,12 @@ def scan(dry_run=True, limit=None):
     return {"dry_run": dry_run, "处理行数": n, "明细": report}
 
 # ---------- 到期提醒(纯云端,无OCR) ----------
-HR_CHAT_ID  = os.environ.get("HR_CHAT_ID", "oc_3bb2d20ed8c37cef6e0d05e027c42854")
-FRANKIE_OID = os.environ.get("FRANKIE_OPEN_ID", "ou_629ce01f4bc31de078e10fcb038dbf78")
-WU_OID      = os.environ.get("WU_OPEN_ID", "ou_c65fc5c31c650790db623640b7ac74f7")   # 吴晓丹 COO
-GAO_OID     = os.environ.get("GAO_OPEN_ID", "ou_11db79f2fe86a26cdccb0b6997059648")  # 高泳昭 人事
+HR_CHAT_ID = os.environ.get("HR_CHAT_ID", "oc_3bb2d20ed8c37cef6e0d05e027c42854")
+REMINDER_RECIPIENT_NAMES = tuple(
+    x.strip() for x in os.environ.get(
+        "REMINDER_RECIPIENT_NAMES", "高泳昭,吴晓丹,潘志聪"
+    ).split(",") if x.strip()
+)
 
 def _txt(v):
     if v is None: return ""
@@ -255,9 +259,34 @@ def send_msg(token, receive_id, id_type, text):
 
 PROBATION_LEAD = int(os.environ.get("PROBATION_LEAD_DAYS", "15"))  # 试用期到期前X天提醒转正评估
 
+def _person_open_id(v):
+    """Return the person-field id as seen by the current App namespace."""
+    if not isinstance(v, list) or not v or not isinstance(v[0], dict):
+        return ""
+    return v[0].get("id") or v[0].get("open_id") or ""
+
+def resolve_recipient_open_ids(rows, names=REMINDER_RECIPIENT_NAMES):
+    """Resolve reminder recipients from the same App read of the HR Base.
+
+    Feishu open_id values are App-scoped, so legacy constants must never be
+    reused after an App migration.
+    """
+    wanted = set(names)
+    resolved = {}
+    for row in rows:
+        fields = row.get("fields") or {}
+        name = _txt(fields.get("员工姓名"))
+        if name not in wanted or name in resolved:
+            continue
+        oid = _person_open_id(fields.get("员工(飞书账号)"))
+        if oid:
+            resolved[name] = oid
+    return resolved, [name for name in names if name not in resolved]
+
 def remind(dry_run=True):
     token = feishu_token()
     rows = list_rows(token)
+    recipients, unresolved = resolve_recipient_open_ids(rows)
     items, prob = [], []
     for r in rows:
         f = r["fields"]
@@ -278,7 +307,8 @@ def remind(dry_run=True):
                 prob.append({"name": name, "job": job, "pe": int(pe), "days": _days_left(pe)})
     items.sort(key=lambda x: x["days"]); prob.sort(key=lambda x: x["days"])
     if not items and not prob:
-        return {"dry_run": dry_run, "count": 0, "note": "无待提醒项"}
+        return {"dry_run": dry_run, "count": 0, "note": "无待提醒项",
+                "recipient_count": len(recipients), "unresolved_recipients": unresolved}
     p0 = any(x["days"] <= 7 for x in items) or any(x["days"] <= 3 for x in prob)
     emoji, lvl = ("🔴", "P0") if p0 else ("🟠", "P1")
     lines = [f"{emoji} [HR·{lvl}] 劳动合同提醒 · 合同到期{len(items)}/转正评估{len(prob)}"]
@@ -298,13 +328,26 @@ def remind(dry_run=True):
             lines.append(f"• {x['name']}（{x['job']}）试用期{pe_s}满 · {flag} · 请走转正评估")
     lines += ["", "👉 到期→更新续签状态/传续签协议; 转正→走转正流程+传转正合同(状态自动转正)"]
     body = "\n".join(lines)
+    delivery = []
     if not dry_run:
-        try: send_msg(token, HR_CHAT_ID, "chat_id", body)
-        except Exception: pass
-        for oid in (GAO_OID, WU_OID, FRANKIE_OID):
-            try: send_msg(token, oid, "open_id", body)
-            except Exception: pass
-    return {"dry_run": dry_run, "count": len(items), "probation": len(prob), "p0": p0, "preview": body}
+        try:
+            send_msg(token, HR_CHAT_ID, "chat_id", body)
+            delivery.append({"target": "HR群", "ok": True})
+        except Exception as ex:
+            delivery.append({"target": "HR群", "ok": False, "error": type(ex).__name__})
+        for name in REMINDER_RECIPIENT_NAMES:
+            oid = recipients.get(name)
+            if not oid:
+                delivery.append({"target": name, "ok": False, "error": "unresolved"})
+                continue
+            try:
+                send_msg(token, oid, "open_id", body)
+                delivery.append({"target": name, "ok": True})
+            except Exception as ex:
+                delivery.append({"target": name, "ok": False, "error": type(ex).__name__})
+    return {"dry_run": dry_run, "count": len(items), "probation": len(prob), "p0": p0,
+            "preview": body, "recipient_count": len(recipients),
+            "unresolved_recipients": unresolved, "delivery": delivery}
 
 # ---------- 离职自动同步(通讯录,纯云端,无OCR) ----------
 def get_user(token, open_id):
@@ -436,10 +479,16 @@ def _bg_scan(limit):
 
 try:
     from fastapi import FastAPI
+    import hr_callback
     api = FastAPI(title="labor-contract-extract")
 
+    @api.on_event("startup")
+    def start_hr_callback():
+        hr_callback.start()
+
     @api.get("/health")
-    def health(): return {"ok": True, "v": 11, "last": _LAST}
+    def health(): return {"ok": True, "v": 12, "last": _LAST,
+                          "hr_callback": hr_callback.snapshot()}
 
     @api.post("/scan")
     def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
