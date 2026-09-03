@@ -477,43 +477,40 @@ def _bg_scan(limit):
     finally:
         _LOCK.release()
 
-try:
-    from fastapi import FastAPI
-    import hr_callback
-    api = FastAPI(title="labor-contract-extract")
+from fastapi import FastAPI
+import hr_callback
+api = FastAPI(title="labor-contract-extract")
 
-    @api.on_event("startup")
-    def start_hr_callback():
-        hr_callback.start()
+@api.on_event("startup")
+def start_hr_callback():
+    hr_callback.start()
 
-    @api.get("/health")
-    def health(): return {"ok": True, "v": 12, "last": _LAST,
-                          "hr_callback": hr_callback.snapshot()}
+@api.get("/health")
+def health(): return {"ok": True, "v": 12, "last": _LAST,
+                      "hr_callback": hr_callback.snapshot()}
 
-    @api.post("/scan")
-    def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
-        # OCR 抽取已永久停用(DashScope 跨境写超时)。员工状态改由 /sync-status 按附件槽自动判定,
-        # 到期日/底薪等由人事手填。保留代码备查,但端点不再执行,以免误触发往备注写报错。
-        return {"disabled": True,
-                "note": "OCR 抽取已停用; 员工状态走 /sync-status(按附件槽), 关键字段人事手填"}
+@api.post("/scan")
+def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
+    # OCR 抽取已永久停用(DashScope 跨境写超时)。员工状态改由 /sync-status 按附件槽自动判定,
+    # 到期日/底薪等由人事手填。保留代码备查,但端点不再执行,以免误触发往备注写报错。
+    return {"disabled": True,
+            "note": "OCR 抽取已停用; 员工状态走 /sync-status(按附件槽), 关键字段人事手填"}
 
-    @api.post("/remind")
-    def remind_ep(dry_run: bool = False):
-        return remind(dry_run=dry_run)
+@api.post("/remind")
+def remind_ep(dry_run: bool = False):
+    return remind(dry_run=dry_run)
 
-    @api.post("/parse-filenames")
-    def parse_ep(dry_run: bool = False):
-        return parse_filenames(dry_run=dry_run)
+@api.post("/parse-filenames")
+def parse_ep(dry_run: bool = False):
+    return parse_filenames(dry_run=dry_run)
 
-    @api.post("/sync-departures")
-    def sync_dep_ep(dry_run: bool = False):
-        return sync_departures(dry_run=dry_run)
+@api.post("/sync-departures")
+def sync_dep_ep(dry_run: bool = False):
+    return sync_departures(dry_run=dry_run)
 
-    @api.post("/sync-status")
-    def sync_status_ep(dry_run: bool = False):
-        return sync_status(dry_run=dry_run)
-except Exception:
-    api = None
+@api.post("/sync-status")
+def sync_status_ep(dry_run: bool = False):
+    return sync_status(dry_run=dry_run)
 
 if __name__ == "__main__":
     import sys
