@@ -1,7 +1,7 @@
 """劳动合同 OCR 抽取服务 — 扫描飞书劳动合同台账，对新上传的合同附件做 Qwen-VL OCR 提取并回填(待核对)。
 全云端，不依赖本地桥接。凭据全部走环境变量。
 """
-import os, io, json, base64, datetime, zoneinfo, urllib.request, urllib.parse
+import os, io, json, base64, datetime, hashlib, zoneinfo, urllib.request, urllib.parse, urllib.error
 
 # R7 uses dedicated variables so the legacy credentials remain intact for
 # one-step rollback during the observation window.
@@ -78,6 +78,27 @@ def update_row_stable(token, record_id, fields):
         update_row(token, record_id, normal)
     if selects:
         update_row(token, record_id, selects)
+
+class FeishuAPIError(RuntimeError):
+    pass
+
+def _require_feishu_ok(result):
+    if isinstance(result, dict) and result.get("code", 0) != 0:
+        raise FeishuAPIError(
+            f"feishu code={result.get('code')} msg={str(result.get('msg', ''))[:200]}"
+        )
+    return result
+
+def _error_summary(ex):
+    if isinstance(ex, urllib.error.HTTPError):
+        try:
+            payload = json.loads(ex.read().decode("utf-8", errors="replace"))
+            return f"http={ex.code} code={payload.get('code')} msg={str(payload.get('msg', ''))[:200]}"
+        except Exception:
+            return f"http={ex.code}"
+    if isinstance(ex, FeishuAPIError):
+        return str(ex)[:240]
+    return type(ex).__name__
 
 # ---------- 渲染 + Qwen-VL ----------
 def render_images(pdf_bytes, max_pages=MAX_PAGES, dpi=120):
@@ -252,10 +273,14 @@ def _days_left(due_ms):
     due = datetime.datetime.fromtimestamp(int(due_ms) / 1000, TZ).date()
     return (due - today).days
 
-def send_msg(token, receive_id, id_type, text):
+def send_msg(token, receive_id, id_type, text, idempotency_key=""):
     url = f"{FEISHU}/im/v1/messages?receive_id_type={id_type}"
-    return _req("POST", url, token, body={"receive_id": receive_id, "msg_type": "text",
-                                          "content": json.dumps({"text": text}, ensure_ascii=False)})
+    body = {"receive_id": receive_id, "msg_type": "text",
+            "content": json.dumps({"text": text}, ensure_ascii=False)}
+    if idempotency_key:
+        # Feishu's native uuid deduplicates retries within its one-hour window.
+        body["uuid"] = hashlib.sha256(idempotency_key.encode("utf-8")).hexdigest()[:32]
+    return _require_feishu_ok(_req("POST", url, token, body=body))
 
 PROBATION_LEAD = int(os.environ.get("PROBATION_LEAD_DAYS", "15"))  # 试用期到期前X天提醒转正评估
 
@@ -307,7 +332,7 @@ def remind(dry_run=True):
                 prob.append({"name": name, "job": job, "pe": int(pe), "days": _days_left(pe)})
     items.sort(key=lambda x: x["days"]); prob.sort(key=lambda x: x["days"])
     if not items and not prob:
-        return {"dry_run": dry_run, "count": 0, "note": "无待提醒项",
+        return {"ok": not unresolved, "dry_run": dry_run, "count": 0, "note": "无待提醒项",
                 "recipient_count": len(recipients), "unresolved_recipients": unresolved}
     p0 = any(x["days"] <= 7 for x in items) or any(x["days"] <= 3 for x in prob)
     emoji, lvl = ("🔴", "P0") if p0 else ("🟠", "P1")
@@ -329,32 +354,39 @@ def remind(dry_run=True):
     lines += ["", "👉 到期→更新续签状态/传续签协议; 转正→走转正流程+传转正合同(状态自动转正)"]
     body = "\n".join(lines)
     delivery = []
+    run_date = datetime.datetime.now(TZ).date().isoformat()
     if not dry_run:
         try:
-            send_msg(token, HR_CHAT_ID, "chat_id", body)
+            send_msg(token, HR_CHAT_ID, "chat_id", body,
+                     f"hr-reminder:{run_date}:chat_id:{HR_CHAT_ID}")
             delivery.append({"target": "HR群", "ok": True})
         except Exception as ex:
-            delivery.append({"target": "HR群", "ok": False, "error": type(ex).__name__})
+            delivery.append({"target": "HR群", "ok": False, "error": _error_summary(ex)})
         for name in REMINDER_RECIPIENT_NAMES:
             oid = recipients.get(name)
             if not oid:
                 delivery.append({"target": name, "ok": False, "error": "unresolved"})
                 continue
             try:
-                send_msg(token, oid, "open_id", body)
+                send_msg(token, oid, "open_id", body,
+                         f"hr-reminder:{run_date}:open_id:{oid}")
                 delivery.append({"target": name, "ok": True})
             except Exception as ex:
-                delivery.append({"target": name, "ok": False, "error": type(ex).__name__})
-    return {"dry_run": dry_run, "count": len(items), "probation": len(prob), "p0": p0,
+                delivery.append({"target": name, "ok": False, "error": _error_summary(ex)})
+    sent_count = sum(1 for item in delivery if item["ok"])
+    failed_count = sum(1 for item in delivery if not item["ok"])
+    ok = not unresolved and (dry_run or failed_count == 0)
+    return {"ok": ok, "dry_run": dry_run, "count": len(items), "probation": len(prob), "p0": p0,
             "preview": body, "recipient_count": len(recipients),
-            "unresolved_recipients": unresolved, "delivery": delivery}
+            "unresolved_recipients": unresolved, "sent_count": sent_count,
+            "failed_count": failed_count, "delivery": delivery}
 
 # ---------- 离职自动同步(通讯录,纯云端,无OCR) ----------
 def get_user(token, open_id):
-    try:
-        return _req("GET", f"{FEISHU}/contact/v3/users/{open_id}?user_id_type=open_id", token).get("data", {}).get("user", {})
-    except Exception:
-        return None
+    result = _require_feishu_ok(
+        _req("GET", f"{FEISHU}/contact/v3/users/{open_id}?user_id_type=open_id", token)
+    )
+    return result.get("data", {}).get("user", {})
 
 def sync_departures(dry_run=True):
     token = feishu_token()
@@ -384,6 +416,8 @@ def sync_status(dry_run=True):
     token = feishu_token()
     rows = list_rows(token)
     out = []
+    pending_updates = []
+    contact_failures = []
     for r in rows:
         f = r["fields"]
         cur = _txt(f.get("员工状态"))
@@ -393,10 +427,21 @@ def sync_status(dry_run=True):
         oid = (pf[0].get("id") or pf[0].get("open_id")) if isinstance(pf, list) and pf else None
         resigned = False
         if oid:
-            u = get_user(token, oid)
+            try:
+                u = get_user(token, oid)
+            except Exception as ex:
+                # Departure is the highest-priority state. If it cannot be
+                # checked, do not derive or write a lower-priority status.
+                contact_failures.append({"员工": name, "record_id": r["record_id"],
+                                         "error": _error_summary(ex)})
+                continue
             if u:
                 st = u.get("status") or {}
                 resigned = bool(st.get("is_resigned") or st.get("is_exited"))
+        else:
+            contact_failures.append({"员工": name, "record_id": r["record_id"],
+                                     "error": "missing_open_id"})
+            continue
         target, extra, reason = None, {}, ""
         if resigned:
             if cur != "离职":
@@ -420,9 +465,18 @@ def sync_status(dry_run=True):
         if target:
             fields = {"员工状态": target}; fields.update(extra)
             out.append({"员工": name, "改为": target, "来源": reason})
-            if not dry_run:
-                update_row_stable(token, r["record_id"], fields)
-    return {"dry_run": dry_run, "changed": len(out), "detail": out}
+            pending_updates.append((r["record_id"], fields))
+    if contact_failures:
+        return {"ok": False, "dry_run": dry_run, "changed": 0,
+                "planned_changes": len(pending_updates),
+                "contact_lookup_failures": len(contact_failures),
+                "contact_failures": contact_failures,
+                "error": "contact_lookup_failed"}
+    if not dry_run:
+        for record_id, fields in pending_updates:
+            update_row_stable(token, record_id, fields)
+    return {"ok": True, "dry_run": dry_run, "changed": len(out),
+            "contact_lookup_failures": 0, "detail": out}
 
 # ---------- 文件名日期解析(纯云端,无OCR) ----------
 import re
@@ -478,6 +532,7 @@ def _bg_scan(limit):
         _LOCK.release()
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 import hr_callback
 api = FastAPI(title="labor-contract-extract")
 
@@ -486,7 +541,7 @@ def start_hr_callback():
     hr_callback.start()
 
 @api.get("/health")
-def health(): return {"ok": True, "v": 12, "last": _LAST,
+def health(): return {"ok": True, "v": 13, "last": _LAST,
                       "hr_callback": hr_callback.snapshot()}
 
 @api.post("/scan")
@@ -498,7 +553,8 @@ def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):
 
 @api.post("/remind")
 def remind_ep(dry_run: bool = False):
-    return remind(dry_run=dry_run)
+    result = remind(dry_run=dry_run)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 502)
 
 @api.post("/parse-filenames")
 def parse_ep(dry_run: bool = False):
@@ -510,7 +566,8 @@ def sync_dep_ep(dry_run: bool = False):
 
 @api.post("/sync-status")
 def sync_status_ep(dry_run: bool = False):
-    return sync_status(dry_run=dry_run)
+    result = sync_status(dry_run=dry_run)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 424)
 
 if __name__ == "__main__":
     import sys

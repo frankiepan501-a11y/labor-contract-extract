@@ -24,4 +24,4 @@
 - `REMINDER_RECIPIENT_NAMES`（默认仅高泳昭、吴晓丹、潘志聪；从当前 App 读取的人员字段解析 open_id）
 - `HR_CARD_ACTIONS`（默认只允许 `hr_r7_verify`）
 
-由 n8n 每日 09:30 BJ 依次调用 `/sync-status` 与 `/remind`。卡片回调使用官方 `lark-channel-sdk` 常驻长连接，拒绝非 `hr_` 或未列入允许清单的动作。
+由 n8n 每日 09:30 BJ 依次调用 `/sync-status` 与 `/remind`。人员状态读取失败或员工缺少飞书账号时，`/sync-status` 返回 HTTP 424、列出失败对象且不写任何状态；任一提醒目标发送失败时 `/remind` 返回 HTTP 502，并返回脱敏后的飞书错误码。每个目标按“北京时间日期 + 接收类型 + 接收 ID”生成飞书原生 `uuid`，防止 1 小时内的工作流重试重复发送。卡片回调使用官方 `lark-channel-sdk` 常驻长连接，拒绝非 `hr_` 或未列入允许清单的动作。
