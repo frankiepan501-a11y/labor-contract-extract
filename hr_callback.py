@@ -98,8 +98,8 @@ def _run(app_id, app_secret):
 
 def start():
     global _THREAD
-    app_id = os.environ.get("HR_FEISHU_APP_ID") or os.environ.get("FEISHU_APP_ID", "")
-    app_secret = os.environ.get("HR_FEISHU_APP_SECRET") or os.environ.get("FEISHU_APP_SECRET", "")
+    app_id = os.environ.get("HR_FEISHU_APP_ID", "")
+    app_secret = os.environ.get("HR_FEISHU_APP_SECRET", "")
     if not app_id or not app_secret:
         STATE.update(enabled=False, connection="disabled", error="missing_credentials")
         return

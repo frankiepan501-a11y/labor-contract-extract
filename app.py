@@ -3,10 +3,9 @@
 """
 import os, io, json, base64, datetime, hashlib, zoneinfo, urllib.request, urllib.parse, urllib.error
 
-# R7 uses dedicated variables so the legacy credentials remain intact for
-# one-step rollback during the observation window.
-FEISHU_APP_ID = os.environ.get("HR_FEISHU_APP_ID") or os.environ.get("FEISHU_APP_ID", "")
-FEISHU_APP_SECRET = os.environ.get("HR_FEISHU_APP_SECRET") or os.environ.get("FEISHU_APP_SECRET", "")
+# R9: the service is bound exclusively to the 人事行政助手 App.
+FEISHU_APP_ID = os.environ.get("HR_FEISHU_APP_ID", "")
+FEISHU_APP_SECRET = os.environ.get("HR_FEISHU_APP_SECRET", "")
 DASHSCOPE_KEY     = os.environ.get("DASHSCOPE_KEY", "")
 DASHSCOPE_BASE    = os.environ.get("DASHSCOPE_BASE", "https://dashscope.aliyuncs.com")
 BASE_APP_TOKEN    = os.environ.get("CONTRACT_APP_TOKEN", "XDhxbyWQKazDw5s3OJoc7j7cnNh")
@@ -541,7 +540,7 @@ def start_hr_callback():
     hr_callback.start()
 
 @api.get("/health")
-def health(): return {"ok": True, "v": 13, "last": _LAST,
+def health(): return {"ok": True, "v": 14, "last": _LAST,
                       "hr_callback": hr_callback.snapshot()}
 
 @api.post("/scan")

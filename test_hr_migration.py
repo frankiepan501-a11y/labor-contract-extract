@@ -1,5 +1,7 @@
 import asyncio
 import datetime
+import importlib
+import os
 import types
 import unittest
 from unittest import mock
@@ -138,6 +140,32 @@ class CardCallbackTests(unittest.TestCase):
         )
         asyncio.run(hr_callback.handle_card_action(event, Channel()))
         self.assertEqual(hr_callback.STATE["error"], "action_not_allowed")
+
+
+class DedicatedCredentialTests(unittest.TestCase):
+    def test_app_does_not_accept_legacy_app_credentials(self):
+        env = {
+            "FEISHU_APP_ID": "legacy-id",
+            "FEISHU_APP_SECRET": "legacy-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=True):
+            reloaded = importlib.reload(app)
+            self.assertEqual(reloaded.FEISHU_APP_ID, "")
+            self.assertEqual(reloaded.FEISHU_APP_SECRET, "")
+        importlib.reload(app)
+
+    def test_callback_does_not_start_with_legacy_app_credentials(self):
+        env = {
+            "FEISHU_APP_ID": "legacy-id",
+            "FEISHU_APP_SECRET": "legacy-secret",
+        }
+        with mock.patch.dict(os.environ, env, clear=True), \
+             mock.patch.object(hr_callback, "_THREAD", None):
+            hr_callback.STATE.update(enabled=True, connection="connected", error=None)
+            hr_callback.start()
+        self.assertFalse(hr_callback.STATE["enabled"])
+        self.assertEqual(hr_callback.STATE["connection"], "disabled")
+        self.assertEqual(hr_callback.STATE["error"], "missing_credentials")
 
 
 if __name__ == "__main__":
