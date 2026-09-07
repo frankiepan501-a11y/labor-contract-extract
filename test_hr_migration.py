@@ -11,6 +11,7 @@ from unittest import mock
 import app
 import hr_callback
 import hr_local_bridge
+import hr_readonly
 
 
 class RecipientNamespaceTests(unittest.TestCase):
@@ -211,6 +212,88 @@ class LocalContractBridgeTests(unittest.TestCase):
             asyncio.run(hr_local_bridge.handle_message(msg, channel))
         execute.assert_called_once_with("测试员工")
         self.assertEqual(channel.reply.await_count, 2)
+
+
+class HRReadonlyCommandTests(unittest.TestCase):
+    def test_parses_roster_job_and_attendance_commands(self):
+        self.assertEqual(hr_readonly.parse_command("＃花名册　人事部"),
+                         {"kind": "roster", "keyword": "人事部"})
+        self.assertEqual(hr_readonly.parse_command("#岗位查询 独立站运营专员"),
+                         {"kind": "job", "keyword": "独立站运营专员"})
+        self.assertEqual(hr_readonly.parse_command("#考勤查询 测试员工 2026-09-01 2026-09-07"), {
+            "kind": "attendance", "name": "测试员工",
+            "start": "2026-09-01", "end": "2026-09-07",
+        })
+        self.assertIsNone(hr_readonly.parse_command("帮我查花名册"))
+
+    def test_roster_projects_only_business_fields_and_filters_job(self):
+        employees = [{"system_fields": {
+            "name": "测试员工", "department_id": "od-test",
+            "job": {"name": "人事专员"}, "status": 2,
+            "mobile": "must-not-leak", "id_number": "must-not-leak",
+        }}]
+        with mock.patch.object(hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_readonly, "list_employees", return_value=employees), \
+             mock.patch.object(hr_readonly, "_department_names", return_value={"od-test": "人事部"}):
+            result = hr_readonly.query_roster("人事", by_job=True)
+        self.assertEqual(result["rows"], [{
+            "name": "测试员工", "job": "人事专员", "department": "人事部", "status": "在职"
+        }])
+        self.assertNotIn("mobile", json.dumps(result))
+        self.assertNotIn("id_number", json.dumps(result))
+
+    def test_attendance_summary_omits_sensitive_raw_details(self):
+        employee = {"user_id": "employee-test", "system_fields": {"name": "测试员工"}}
+        api_result = {"code": 0, "data": {"user_task_results": [{"records": [{
+            "check_in_result": "Late", "check_out_result": "Normal",
+            "check_in_record": {"location_name": "must-not-leak", "photo_urls": ["must-not-leak"]},
+        }]}], "invalid_user_ids": [], "unauthorized_user_ids": []}}
+        with mock.patch.object(hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_readonly, "_request_json", return_value=api_result):
+            result = hr_readonly.query_attendance("测试员工", "2026-09-01", "2026-09-01")
+        self.assertEqual(result["late_days"], 1)
+        serialized = json.dumps(result)
+        self.assertNotIn("location_name", serialized)
+        self.assertNotIn("photo_urls", serialized)
+
+    def test_system_check_counts_as_normal_day(self):
+        employee = {"user_id": "employee-test", "system_fields": {"name": "测试员工"}}
+        api_result = {"code": 0, "data": {"user_task_results": [{"records": [{
+            "check_in_result": "SystemCheck", "check_out_result": "SystemCheck",
+        }]}], "invalid_user_ids": [], "unauthorized_user_ids": []}}
+        with mock.patch.object(hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_readonly, "_request_json", return_value=api_result):
+            result = hr_readonly.query_attendance("测试员工", "2026-09-01", "2026-09-01")
+        self.assertEqual(result["scheduled_days"], 1)
+        self.assertEqual(result["normal_days"], 1)
+
+    def test_readonly_command_runs_once_and_replies_without_progress_message(self):
+        msg = types.SimpleNamespace(
+            sender_is_bot=False, chat_type="p2p", mentioned_bot=False,
+            body_text="#花名册 人事部", content_text="#花名册 人事部",
+        )
+        channel = types.SimpleNamespace(reply=mock.AsyncMock())
+        with mock.patch.object(hr_local_bridge, "execute_readonly_command", return_value="只读结果") as execute:
+            asyncio.run(hr_local_bridge.handle_message(msg, channel))
+        execute.assert_called_once_with({"kind": "roster", "keyword": "人事部"})
+        channel.reply.assert_awaited_once_with(msg, "只读结果")
+
+    def test_readonly_errors_are_explained_without_internal_error_names(self):
+        msg = types.SimpleNamespace(
+            sender_is_bot=False, chat_type="p2p", mentioned_bot=False,
+            body_text="#考勤查询 测试员工 2026/09/01", content_text="#考勤查询 测试员工 2026/09/01",
+        )
+        channel = types.SimpleNamespace(reply=mock.AsyncMock())
+        with mock.patch.object(
+            hr_local_bridge, "execute_readonly_command",
+            side_effect=hr_readonly.HRReadonlyError("invalid_date_format"),
+        ):
+            asyncio.run(hr_local_bridge.handle_message(msg, channel))
+        reply = channel.reply.await_args.args[1]
+        self.assertIn("YYYY-MM-DD", reply)
+        self.assertNotIn("HRReadonlyError", reply)
 
 
 class DedicatedCredentialTests(unittest.TestCase):

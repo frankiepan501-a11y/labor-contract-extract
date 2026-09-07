@@ -19,6 +19,8 @@ import threading
 import time
 import unicodedata
 
+import hr_readonly
+
 logging.basicConfig(level=logging.ERROR)
 
 from lark_channel import Events, FeishuChannel, SecurityConfig
@@ -84,6 +86,10 @@ def execute_contract_command(name: str) -> str:
     return format_result(name, scan_result, status_result)
 
 
+def execute_readonly_command(command: dict) -> str:
+    return hr_readonly.execute(command)
+
+
 async def handle_message(msg, channel) -> None:
     if getattr(msg, "sender_is_bot", False):
         return
@@ -91,21 +97,32 @@ async def handle_message(msg, channel) -> None:
         return
     text = getattr(msg, "body_text", "") or getattr(msg, "content_text", "") or ""
     name = parse_contract_command(text)
-    if name is None:
+    readonly_command = hr_readonly.parse_command(text) if name is None else None
+    if name is None and readonly_command is None:
         return
-    write_status(last_command_at=int(time.time()))
+    command_type = "contract" if name is not None else readonly_command["kind"]
+    write_status(last_command_at=int(time.time()), last_command_type=command_type)
     if not RUN_LOCK.acquire(blocking=False):
         write_status(last_command_result="busy", last_error_code=None)
-        await channel.reply(msg, "合同识别正在处理中，请等待上一项完成后再试。")
+        busy_name = "合同识别" if name is not None else "人事查询"
+        await channel.reply(msg, f"{busy_name}正在处理中，请等待上一项完成后再试。")
         return
     try:
-        target = name or "全员未解析附件"
-        await channel.reply(msg, f"已收到 #合同识别，目标：{target}。开始读取劳动合同台账；只处理未解析附件。")
         try:
-            result = await asyncio.to_thread(execute_contract_command, name)
+            if name is not None:
+                target = name or "全员未解析附件"
+                await channel.reply(msg, f"已收到 #合同识别，目标：{target}。开始读取劳动合同台账；只处理未解析附件。")
+                result = await asyncio.to_thread(execute_contract_command, name)
+            else:
+                result = await asyncio.to_thread(execute_readonly_command, readonly_command)
         except Exception as exc:
             write_status(last_command_result="failed", last_error_code=type(exc).__name__)
-            await channel.reply(msg, f"合同识别失败（{type(exc).__name__}）。本次未标记附件为已解析，请稍后重试或联系管理员。")
+            if name is not None:
+                message = f"合同识别失败（{type(exc).__name__}）。本次未标记附件为已解析，请稍后重试或联系管理员。"
+            else:
+                reason = hr_readonly.format_error(exc)
+                message = f"人事只读查询失败：{reason}\n本次没有写入任何人事或考勤数据。"
+            await channel.reply(msg, message)
             return
         write_status(last_command_result="success", last_error_code=None)
         await channel.reply(msg, result)
