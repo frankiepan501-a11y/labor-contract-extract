@@ -52,7 +52,7 @@ if ($Command -eq 'start') {
         }
     }
     [pscustomobject]@{ running = $true; healthy = $connected; pid = $proc.Id; state = $state } | ConvertTo-Json -Compress
-    exit 0
+    if ($connected) { exit 0 } else { exit 1 }
 }
 
 if ($Command -eq 'stop') {
