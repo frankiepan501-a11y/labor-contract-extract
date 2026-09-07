@@ -6,6 +6,7 @@ import json
 import os
 import types
 import unittest
+from pathlib import Path
 from unittest import mock
 
 import app
@@ -13,6 +14,13 @@ import hr_callback
 import hr_local_bridge
 import hr_readonly
 import hr_internal
+
+
+class PackagingTests(unittest.TestCase):
+    def test_docker_image_packages_hr_modules(self):
+        dockerfile = Path(__file__).with_name("Dockerfile").read_text(encoding="utf-8")
+        self.assertIn("COPY hr_internal.py .", dockerfile)
+        self.assertIn("COPY hr_readonly.py .", dockerfile)
 
 
 class RecipientNamespaceTests(unittest.TestCase):
