@@ -98,6 +98,9 @@ def _run(app_id, app_secret):
 
 def start():
     global _THREAD
+    if os.environ.get("HR_CALLBACK_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+        STATE.update(enabled=False, connection="disabled", error="disabled_by_config")
+        return
     app_id = os.environ.get("HR_FEISHU_APP_ID", "")
     app_secret = os.environ.get("HR_FEISHU_APP_SECRET", "")
     if not app_id or not app_secret:

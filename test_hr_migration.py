@@ -8,6 +8,7 @@ from unittest import mock
 
 import app
 import hr_callback
+import hr_local_bridge
 
 
 class RecipientNamespaceTests(unittest.TestCase):
@@ -140,6 +141,42 @@ class CardCallbackTests(unittest.TestCase):
         )
         asyncio.run(hr_callback.handle_card_action(event, Channel()))
         self.assertEqual(hr_callback.STATE["error"], "action_not_allowed")
+
+    def test_cloud_callback_can_be_disabled_for_local_cutover(self):
+        with mock.patch.dict(os.environ, {"HR_CALLBACK_ENABLED": "0"}, clear=True), \
+             mock.patch.object(hr_callback, "_THREAD", None):
+            hr_callback.STATE.update(enabled=True, connection="connected", error=None)
+            hr_callback.start()
+        self.assertFalse(hr_callback.STATE["enabled"])
+        self.assertEqual(hr_callback.STATE["connection"], "disabled")
+        self.assertEqual(hr_callback.STATE["error"], "disabled_by_config")
+
+
+class LocalContractBridgeTests(unittest.TestCase):
+    def test_command_parser_is_strict_and_normalizes_fullwidth(self):
+        self.assertEqual(hr_local_bridge.parse_contract_command("＃合同识别　测试员工"), "测试员工")
+        self.assertEqual(hr_local_bridge.parse_contract_command("#合同识别"), "")
+        self.assertIsNone(hr_local_bridge.parse_contract_command("帮我#合同识别"))
+
+    def test_group_message_requires_bot_mention(self):
+        msg = types.SimpleNamespace(
+            sender_is_bot=False, chat_type="group", mentioned_bot=False,
+            body_text="#合同识别 测试员工", content_text="#合同识别 测试员工",
+        )
+        channel = types.SimpleNamespace(reply=mock.AsyncMock())
+        asyncio.run(hr_local_bridge.handle_message(msg, channel))
+        channel.reply.assert_not_awaited()
+
+    def test_named_command_runs_once_and_replies(self):
+        msg = types.SimpleNamespace(
+            sender_is_bot=False, chat_type="p2p", mentioned_bot=False,
+            body_text="#合同识别 测试员工", content_text="#合同识别 测试员工",
+        )
+        channel = types.SimpleNamespace(reply=mock.AsyncMock())
+        with mock.patch.object(hr_local_bridge, "execute_contract_command", return_value="已完成") as execute:
+            asyncio.run(hr_local_bridge.handle_message(msg, channel))
+        execute.assert_called_once_with("测试员工")
+        self.assertEqual(channel.reply.await_count, 2)
 
 
 class DedicatedCredentialTests(unittest.TestCase):
