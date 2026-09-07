@@ -12,6 +12,7 @@ import app
 import hr_callback
 import hr_local_bridge
 import hr_readonly
+import hr_internal
 
 
 class RecipientNamespaceTests(unittest.TestCase):
@@ -294,6 +295,141 @@ class HRReadonlyCommandTests(unittest.TestCase):
         reply = channel.reply.await_args.args[1]
         self.assertIn("YYYY-MM-DD", reply)
         self.assertNotIn("HRReadonlyError", reply)
+
+
+class HRInternalApiTests(unittest.TestCase):
+    def test_internal_token_fails_closed(self):
+        with mock.patch.dict(os.environ, {"HR_INTERNAL_API_TOKEN": "expected"}, clear=True):
+            self.assertFalse(hr_internal.authorized(""))
+            self.assertFalse(hr_internal.authorized("Bearer wrong"))
+            self.assertTrue(hr_internal.authorized("Bearer expected"))
+
+    def test_people_projection_contains_only_minimum_fields(self):
+        employees = [{"system_fields": {
+            "name": "测试员工", "department_id": "od-test",
+            "job": {"name": "亚马逊运营专员"}, "status": 2,
+            "conversion_date": "2026-01-02", "hire_date": "2025-12-01",
+            "mobile": "must-not-leak", "id_number": "must-not-leak",
+        }}]
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=employees), \
+             mock.patch.object(hr_internal.hr_readonly, "_department_names", return_value={"od-test": "电商平台运营部"}):
+            result = hr_internal.people_minimal(purpose="amazon_kpi")
+        self.assertEqual(result["rows"], [{
+            "name": "测试员工", "job": "亚马逊运营专员", "active": True,
+            "conversion_date": "2026-01-02", "hire_date": "2025-12-01",
+        }])
+        serialized = json.dumps(result, ensure_ascii=False)
+        self.assertNotIn("mobile", serialized)
+        self.assertNotIn("id_number", serialized)
+        self.assertNotIn("open_id", serialized)
+
+    def test_warehouse_people_projection_requires_names_and_returns_only_status(self):
+        employee = {"system_fields": {"name": "仓库负责人", "status": 2, "job": {"name": "仓库主管"}}}
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=[employee]):
+            result = hr_internal.people_minimal("warehouse_owner_audit", names=["仓库负责人"])
+        self.assertEqual(result["rows"], [{"name": "仓库负责人", "active": True}])
+        with self.assertRaisesRegex(hr_readonly.HRReadonlyError, "people_names_required"):
+            hr_internal.people_minimal("warehouse_owner_audit", names=[])
+
+    def test_monthly_attendance_preserves_existing_business_calculation(self):
+        employee = {"user_id": "employee-test", "system_fields": {
+            "name": "测试员工", "status": 2, "job": {"name": "人事专员"},
+        }}
+        task_result = {"code": 0, "data": {"user_task_results": [{
+            "day": 20260901, "records": [{
+                "check_in_result": "Late", "check_out_result": "Normal",
+                "check_in_shift_time": 1000, "check_in_record_time": 1600,
+            }]
+        }]}}
+        approval_result = {"code": 0, "data": {"user_approvals": [{"leaves": [
+            {"i18n_names": {"ch": "病假"}, "interval": 27000},
+            {"i18n_names": {"ch": "事假"}, "interval": 7200},
+        ]}]}}
+        def fake_request(_method, url, _token="", body=None):
+            return approval_result if "user_approvals" in url else task_result
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_internal.hr_readonly, "_request_json", side_effect=fake_request):
+            result = hr_internal.monthly_attendance("2026-09", previous_names=[])
+        row = result["rows"][0]
+        self.assertEqual(row["late_days"], 1)
+        self.assertEqual(row["late_minutes"], 10)
+        self.assertEqual(row["sick_days"], 1.0)
+        self.assertEqual(row["personal_hours"], 2.0)
+        self.assertEqual(row["is_full_attendance"], "否")
+        self.assertNotIn("records", json.dumps(result))
+
+    def test_monthly_attendance_fails_closed_for_unauthorized_user(self):
+        employee = {"user_id": "employee-test", "system_fields": {"name": "测试员工", "status": 2}}
+        denied = {"code": 0, "data": {"unauthorized_user_ids": ["employee-test"], "user_task_results": []}}
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_internal.hr_readonly, "_request_json", return_value=denied):
+            with self.assertRaisesRegex(hr_readonly.HRReadonlyError, "attendance_user_unauthorized"):
+                hr_internal.monthly_attendance("2026-09", previous_names=[])
+
+    def test_empty_weekday_task_preserves_legacy_holiday_rule(self):
+        employee = {"user_id": "employee-test", "system_fields": {"name": "测试员工", "status": 2}}
+        task_result = {"code": 0, "data": {"user_task_results": [{"day": 20260901, "records": []}]}}
+        approval_result = {"code": 0, "data": {"user_approvals": []}}
+        def fake_request(_method, url, _token="", body=None):
+            return approval_result if "user_approvals" in url else task_result
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_internal.hr_readonly, "_request_json", side_effect=fake_request):
+            result = hr_internal.monthly_attendance("2026-09", previous_names=[])
+        self.assertEqual(result["rows"][0]["statutory_holiday_days"], 1)
+
+    def test_late_seconds_are_aggregated_before_rounding_like_active_workflow(self):
+        employee = {"user_id": "employee-test", "system_fields": {"name": "测试员工", "status": 2}}
+        task_result = {"code": 0, "data": {"user_task_results": [{
+            "day": 20260901, "records": [
+                {"check_in_result": "Late", "check_out_result": "Normal", "check_in_shift_time": 1000, "check_in_record_time": 1030},
+                {"check_in_result": "Late", "check_out_result": "Normal", "check_in_shift_time": 2000, "check_in_record_time": 2030},
+            ],
+        }]}}
+        approval_result = {"code": 0, "data": {"user_approvals": []}}
+        def fake_request(_method, url, _token="", body=None):
+            return approval_result if "user_approvals" in url else task_result
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=[employee]), \
+             mock.patch.object(hr_internal.hr_readonly, "_request_json", side_effect=fake_request):
+            result = hr_internal.monthly_attendance("2026-09", previous_names=[])
+        self.assertEqual(result["rows"][0]["late_minutes"], 1)
+
+    def test_departed_employee_is_included_only_when_previously_known(self):
+        employees = [
+            {"user_id": "active", "system_fields": {"name": "在职员工", "status": 2}},
+            {"user_id": "departed", "system_fields": {"name": "离职员工", "status": 5}},
+            {"user_id": "old", "system_fields": {"name": "历史离职", "status": 5}},
+        ]
+        empty = {"code": 0, "data": {"user_task_results": [], "user_approvals": []}}
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=employees), \
+             mock.patch.object(hr_internal.hr_readonly, "_request_json", return_value=empty):
+            result = hr_internal.monthly_attendance("2026-09", previous_names=["在职员工", "离职员工"])
+        self.assertEqual([row["name"] for row in result["rows"]], ["在职员工", "离职员工"])
+        self.assertEqual(result["departed_names"], ["离职员工"])
+
+    def test_monthly_notification_dry_run_does_not_send(self):
+        employees = [
+            {"user_id": "hr-open-id", "system_fields": {"name": "高泳昭", "status": 2, "job": {"name": "人事行政专员"}}},
+            {"user_id": "coo-open-id", "system_fields": {"name": "吴晓丹", "status": 2, "job": {"name": "COO"}}},
+            {"user_id": "frankie-open-id", "system_fields": {"name": "潘志聪", "status": 2, "job": {"name": "负责人"}}},
+            {"user_id": "other-open-id", "system_fields": {"name": "其他员工", "status": 2, "job": {"name": "运营专员"}}},
+        ]
+        with mock.patch.object(hr_internal.hr_readonly, "feishu_token", return_value="token"), \
+             mock.patch.object(hr_internal.hr_readonly, "list_employees", return_value=employees), \
+             mock.patch.object(app, "send_msg") as send:
+            result = app.notify_monthly_attendance({
+                "month": "2026/09", "success": 2, "total": 2, "failed": 0, "dry_run": True,
+            })
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["recipient_count"], 3)
+        self.assertEqual(result["sent"], 0)
+        send.assert_not_called()
 
 
 class DedicatedCredentialTests(unittest.TestCase):

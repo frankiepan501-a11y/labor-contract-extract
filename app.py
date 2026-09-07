@@ -538,18 +538,103 @@ def _bg_scan(limit):
     finally:
         _LOCK.release()
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 import hr_callback
+import hr_internal
 api = FastAPI(title="labor-contract-extract")
+
+def _require_internal(authorization: str):
+    if not hr_internal.authorized(authorization):
+        raise HTTPException(status_code=401, detail="unauthorized")
+
+def notify_monthly_attendance(payload: dict):
+    token = hr_internal.hr_readonly.feishu_token()
+    employees = hr_internal.hr_readonly.list_employees(token, user_id_type="open_id")
+    recipients = []
+    seen = set()
+    required_names = set(REMINDER_RECIPIENT_NAMES)
+    for employee in employees:
+        fields = employee.get("system_fields") or {}
+        name = fields.get("name") or ""
+        job = (fields.get("job") or {}).get("name") or ""
+        open_id = employee.get("user_id") or ""
+        is_hr_role = "人事" in job or "行政" in job
+        if not open_id or not (name in required_names or is_hr_role):
+            continue
+        if open_id in seen:
+            continue
+        seen.add(open_id)
+        recipients.append((name, open_id))
+    month = str(payload.get("month") or "")
+    success = int(payload.get("success") or 0)
+    total = int(payload.get("total") or 0)
+    failed = int(payload.get("failed") or 0)
+    dry_run = bool(payload.get("dry_run", True))
+    message = "\n".join([
+        f"🟡 [HR·P2] 月度考勤汇总已生成 · {month}",
+        f"成功写入：{success}/{total} 人；失败：{failed} 人。",
+        "请人事核对全勤天数、实际出勤天数、调休和制度违反项；核对完成后把“考勤确认状态”改为“已确认”，财务才会计算工资。",
+        "https://u1wpma3xuhr.feishu.cn/wiki/On6dwlwLLiOzAzk8dBxcdktQnRg?table=tblOmJPWPTkWzRmC",
+    ])
+    sent = 0
+    failures = []
+    resolved_names = {name for name, _ in recipients}
+    missing_required = sorted(required_names - resolved_names)
+    if missing_required or not recipients:
+        return {
+            "ok": False,
+            "dry_run": dry_run,
+            "recipient_count": len(recipients),
+            "sent": 0,
+            "failed": [],
+            "missing_required": missing_required,
+        }
+    if not dry_run:
+        for name, open_id in recipients:
+            try:
+                send_msg(token, open_id, "open_id", message, f"hr-monthly-attendance:{month}:{open_id}")
+                sent += 1
+            except Exception as exc:
+                failures.append({"name": name, "error": _error_summary(exc)})
+    return {
+        "ok": not failures,
+        "dry_run": dry_run,
+        "recipient_count": len(recipients),
+        "sent": sent,
+        "failed": failures,
+        "missing_required": missing_required,
+    }
 
 @api.on_event("startup")
 def start_hr_callback():
     hr_callback.start()
 
 @api.get("/health")
-def health(): return {"ok": True, "v": 14, "last": _LAST,
+def health(): return {"ok": True, "v": 15, "last": _LAST,
                       "hr_callback": hr_callback.snapshot()}
+
+@api.post("/internal/people/minimal")
+def people_minimal_ep(payload: dict, authorization: str = Header(default="")):
+    _require_internal(authorization)
+    return hr_internal.people_minimal(
+        purpose=str(payload.get("purpose") or ""),
+        names=list(payload.get("names") or []),
+    )
+
+@api.post("/internal/attendance/monthly")
+def monthly_attendance_ep(payload: dict, authorization: str = Header(default="")):
+    _require_internal(authorization)
+    return hr_internal.monthly_attendance(
+        month=str(payload.get("month") or ""),
+        previous_names=list(payload.get("previous_names") or []),
+    )
+
+@api.post("/internal/attendance/monthly-notify")
+def monthly_attendance_notify_ep(payload: dict, authorization: str = Header(default="")):
+    _require_internal(authorization)
+    result = notify_monthly_attendance(payload)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 502)
 
 @api.post("/scan")
 def scan_ep(dry_run: bool = False, limit: int = 0, bg: bool = False):

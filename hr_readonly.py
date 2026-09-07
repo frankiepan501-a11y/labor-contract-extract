@@ -93,12 +93,17 @@ def feishu_token() -> str:
     return result["tenant_access_token"]
 
 
-def list_employees(token: str, user_id_type: str = "open_id") -> list[dict]:
+def list_employees(
+    token: str,
+    user_id_type: str = "open_id",
+    statuses: tuple[int, ...] = (2, 4),
+) -> list[dict]:
     items: list[dict] = []
     page_token = ""
     while True:
-        params = [("view", "full"), ("status", "2"), ("status", "4"),
-                  ("user_id_type", user_id_type), ("page_size", "100")]
+        params = [("view", "full")]
+        params.extend(("status", str(status)) for status in statuses)
+        params.extend((("user_id_type", user_id_type), ("page_size", "100")))
         if page_token:
             params.append(("page_token", page_token))
         result = _request_json("GET", f"{FEISHU}/ehr/v1/employees?{urllib.parse.urlencode(params)}", token)
