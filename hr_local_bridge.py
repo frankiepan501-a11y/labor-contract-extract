@@ -42,7 +42,15 @@ STATUS_PATH = Path(os.environ.get(
     "HR_CONTRACT_STATUS_PATH",
     str(Path.home() / ".claude-to-im" / "runtime" / "hr-contract-bridge-status.json"),
 ))
-STATUS = {"state": "starting", "pid": os.getpid(), "heartbeat_at": 0, "last_command_at": 0, "error": None}
+STATUS = {
+    "state": "starting",
+    "pid": os.getpid(),
+    "heartbeat_at": 0,
+    "last_command_at": 0,
+    "last_command_result": None,
+    "last_error_code": None,
+    "error": None,
+}
 
 
 def write_status(**changes) -> None:
@@ -87,6 +95,7 @@ async def handle_message(msg, channel) -> None:
         return
     write_status(last_command_at=int(time.time()))
     if not RUN_LOCK.acquire(blocking=False):
+        write_status(last_command_result="busy", last_error_code=None)
         await channel.reply(msg, "合同识别正在处理中，请等待上一项完成后再试。")
         return
     try:
@@ -95,8 +104,10 @@ async def handle_message(msg, channel) -> None:
         try:
             result = await asyncio.to_thread(execute_contract_command, name)
         except Exception as exc:
+            write_status(last_command_result="failed", last_error_code=type(exc).__name__)
             await channel.reply(msg, f"合同识别失败（{type(exc).__name__}）。本次未标记附件为已解析，请稍后重试或联系管理员。")
             return
+        write_status(last_command_result="success", last_error_code=None)
         await channel.reply(msg, result)
     finally:
         RUN_LOCK.release()
@@ -138,11 +149,18 @@ async def run() -> None:
 def main() -> int:
     mutex = acquire_single_instance()
     try:
-        try:
-            asyncio.run(run())
-        except Exception as exc:
-            write_status(state="stopped", error=type(exc).__name__)
-            raise
+        retry_seconds = 5
+        while True:
+            try:
+                asyncio.run(run())
+                retry_seconds = 5
+            except KeyboardInterrupt:
+                write_status(state="stopped", error=None)
+                break
+            except Exception as exc:
+                write_status(state="reconnecting", error=type(exc).__name__)
+                time.sleep(retry_seconds)
+                retry_seconds = min(retry_seconds * 2, 60)
     finally:
         if mutex:
             ctypes.windll.kernel32.CloseHandle(mutex)

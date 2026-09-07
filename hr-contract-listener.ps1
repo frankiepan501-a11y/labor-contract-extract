@@ -35,11 +35,23 @@ if ($Command -eq 'start') {
     if (-not $env:HR_FEISHU_APP_ID -or -not $env:HR_FEISHU_APP_SECRET -or -not $env:DASHSCOPE_KEY) {
         throw 'HR contract listener credentials are incomplete.'
     }
+    Remove-Item -LiteralPath $StatusFile -Force -ErrorAction SilentlyContinue
     $proc = Start-Process -FilePath $Python -ArgumentList @($Script) -WorkingDirectory $PSScriptRoot -WindowStyle Hidden -PassThru
     Set-Content -LiteralPath $PidFile -Value $proc.Id -Encoding ascii
-    Start-Sleep -Seconds 3
-    if (-not (Get-ListenerProcess)) { throw 'HR contract listener failed to start.' }
-    Write-Output ('{"running":true,"pid":' + $proc.Id + '}')
+    $connected = $false
+    $state = 'starting'
+    for ($attempt = 0; $attempt -lt 45; $attempt++) {
+        Start-Sleep -Seconds 1
+        if (-not (Get-ListenerProcess)) { throw 'HR contract listener failed to start.' }
+        if (Test-Path -LiteralPath $StatusFile) {
+            try {
+                $current = Get-Content -LiteralPath $StatusFile -Raw | ConvertFrom-Json
+                $state = $current.state
+                if ($state -eq 'connected') { $connected = $true; break }
+            } catch { $state = 'invalid_status' }
+        }
+    }
+    [pscustomobject]@{ running = $true; healthy = $connected; pid = $proc.Id; state = $state } | ConvertTo-Json -Compress
     exit 0
 }
 

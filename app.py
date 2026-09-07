@@ -42,7 +42,12 @@ def _req(method, url, token=None, body=None, raw=False):
         data = json.dumps(body).encode("utf-8")
     r = urllib.request.Request(url, data=data, headers=h, method=method)
     resp = urllib.request.urlopen(r, timeout=180)
-    return resp.read() if raw else json.load(resp)
+    if raw:
+        return resp.read()
+    result = json.load(resp)
+    if isinstance(result, dict) and "code" in result and result.get("code") not in (0, None):
+        raise RuntimeError(f"remote_api_error:{result.get('code')}")
+    return result
 
 def feishu_token():
     d = _req("POST", f"{FEISHU}/auth/v3/tenant_access_token/internal", body={
@@ -70,13 +75,16 @@ def update_row(token, record_id, fields):
     return _req("PUT", url, token, body={"fields": fields})
 
 def update_row_stable(token, record_id, fields):
-    """Bitable single-select fields can be flaky in mixed PUTs; write them last."""
+    """Write single-selects separately and mark attachments parsed only after success."""
     normal = {k: v for k, v in fields.items() if k not in SINGLE_SELECT_FIELDS}
     selects = {k: v for k, v in fields.items() if k in SINGLE_SELECT_FIELDS}
+    parsed_marker = normal.pop("_解析记录(系统)", None)
     if normal:
         update_row(token, record_id, normal)
     if selects:
         update_row(token, record_id, selects)
+    if parsed_marker is not None:
+        update_row(token, record_id, {"_解析记录(系统)": parsed_marker})
 
 class FeishuAPIError(RuntimeError):
     pass

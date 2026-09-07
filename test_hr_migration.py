@@ -1,6 +1,8 @@
 import asyncio
 import datetime
 import importlib
+import io
+import json
 import os
 import types
 import unittest
@@ -31,6 +33,29 @@ class RecipientNamespaceTests(unittest.TestCase):
 
 
 class ReminderSafetyTests(unittest.TestCase):
+    def test_req_rejects_http_200_with_nonzero_business_code(self):
+        response = io.BytesIO(json.dumps({"code": 99991672, "msg": "missing scope"}).encode())
+        with mock.patch("urllib.request.urlopen", return_value=response):
+            with self.assertRaisesRegex(RuntimeError, "remote_api_error:99991672"):
+                app._req("GET", "https://example.invalid")
+
+    def test_parsed_marker_is_written_only_after_all_business_fields(self):
+        calls = []
+
+        def fake_update(_token, _record_id, fields):
+            calls.append(fields)
+            if "AI核对状态" in fields:
+                raise RuntimeError("select_write_failed")
+
+        with mock.patch.object(app, "update_row", side_effect=fake_update):
+            with self.assertRaisesRegex(RuntimeError, "select_write_failed"):
+                app.update_row_stable("token", "rec", {
+                    "备注": "已提取",
+                    "AI核对状态": "待核对",
+                    "_解析记录(系统)": '["file_test"]',
+                })
+        self.assertEqual(calls, [{"备注": "已提取"}, {"AI核对状态": "待核对"}])
+
     def test_send_msg_uses_stable_per_target_idempotency_uuid(self):
         with mock.patch.object(app, "_req", return_value={"data": {"message_id": "om_test"}}) as req:
             app.send_msg("token", "oc_test", "chat_id", "body", "2026-09-04:HR群")
@@ -151,6 +176,15 @@ class CardCallbackTests(unittest.TestCase):
         self.assertEqual(hr_callback.STATE["connection"], "disabled")
         self.assertEqual(hr_callback.STATE["error"], "disabled_by_config")
 
+    def test_cloud_callback_is_fail_closed_when_flag_is_missing(self):
+        with mock.patch.dict(os.environ, {}, clear=True), \
+             mock.patch.object(hr_callback, "_THREAD", None):
+            hr_callback.STATE.update(enabled=True, connection="connected", error=None)
+            hr_callback.start()
+        self.assertFalse(hr_callback.STATE["enabled"])
+        self.assertEqual(hr_callback.STATE["connection"], "disabled")
+        self.assertEqual(hr_callback.STATE["error"], "disabled_by_config")
+
 
 class LocalContractBridgeTests(unittest.TestCase):
     def test_command_parser_is_strict_and_normalizes_fullwidth(self):
@@ -193,6 +227,7 @@ class DedicatedCredentialTests(unittest.TestCase):
 
     def test_callback_does_not_start_with_legacy_app_credentials(self):
         env = {
+            "HR_CALLBACK_ENABLED": "1",
             "FEISHU_APP_ID": "legacy-id",
             "FEISHU_APP_SECRET": "legacy-secret",
         }

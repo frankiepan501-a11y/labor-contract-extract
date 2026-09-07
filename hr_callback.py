@@ -45,7 +45,7 @@ def completed_card():
         },
         "elements": [
             {"tag": "div", "text": {"tag": "lark_md", "content":
-                "**验证结果**\n云端常驻消费者已收到按钮操作，并由同一 App 更新原卡。"}},
+                "**验证结果**\n人事行政助手本地常驻消费者已收到按钮操作，并由同一 App 更新原卡。"}},
             {"tag": "note", "elements": [{"tag": "plain_text", "content":
                 "本次未读取或写入 HR Base，未触发员工消息、审批或考勤写入。"}]},
         ],
@@ -98,7 +98,7 @@ def _run(app_id, app_secret):
 
 def start():
     global _THREAD
-    if os.environ.get("HR_CALLBACK_ENABLED", "1").strip().lower() in {"0", "false", "no", "off"}:
+    if os.environ.get("HR_CALLBACK_ENABLED", "0").strip().lower() not in {"1", "true", "yes", "on"}:
         STATE.update(enabled=False, connection="disabled", error="disabled_by_config")
         return
     app_id = os.environ.get("HR_FEISHU_APP_ID", "")
