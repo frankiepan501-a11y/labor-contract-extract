@@ -33,7 +33,8 @@ def people_minimal(purpose: str, names: list[str] | None = None) -> dict:
     if purpose == "warehouse_owner_audit" and not wanted_names:
         raise hr_readonly.HRReadonlyError("people_names_required")
     token = hr_readonly.feishu_token()
-    employees = hr_readonly.list_employees(token, statuses=(2, 4, 5))
+    statuses = (2, 4) if purpose == "amazon_kpi" else (2, 4, 5)
+    employees = hr_readonly.list_employees(token, statuses=statuses)
     rows = []
     for employee in employees:
         fields = _system_fields(employee)
@@ -49,7 +50,6 @@ def people_minimal(purpose: str, names: list[str] | None = None) -> dict:
             row.update({
                 "job": job_name or "未填写职务",
                 "conversion_date": fields.get("conversion_date") or "",
-                "hire_date": fields.get("hire_date") or "",
             })
         rows.append(row)
     rows.sort(key=lambda row: row["name"])

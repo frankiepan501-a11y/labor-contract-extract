@@ -317,7 +317,7 @@ class HRInternalApiTests(unittest.TestCase):
             result = hr_internal.people_minimal(purpose="amazon_kpi")
         self.assertEqual(result["rows"], [{
             "name": "测试员工", "job": "亚马逊运营专员", "active": True,
-            "conversion_date": "2026-01-02", "hire_date": "2025-12-01",
+            "conversion_date": "2026-01-02",
         }])
         serialized = json.dumps(result, ensure_ascii=False)
         self.assertNotIn("mobile", serialized)
