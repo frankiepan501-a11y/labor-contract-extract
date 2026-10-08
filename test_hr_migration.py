@@ -132,6 +132,28 @@ class ReminderSafetyTests(unittest.TestCase):
         self.assertEqual(result["contact_failures"][0]["error"], "missing_open_id")
         update.assert_not_called()
 
+    def test_sync_status_skips_departed_row_without_open_id(self):
+        rows = [
+            {"record_id": "rec_departed", "fields": {
+                "员工姓名": [{"text": "已离职员工"}], "员工状态": "离职",
+            }},
+            {"record_id": "rec_active", "fields": {
+                "员工姓名": [{"text": "在职员工"}], "员工状态": "",
+                "员工(飞书账号)": [{"id": "ou_active"}],
+                "试用期劳动合同附件": [{"file_token": "file_test"}],
+            }},
+        ]
+        with mock.patch.object(app, "feishu_token", return_value="token"), \
+             mock.patch.object(app, "list_rows", return_value=rows), \
+             mock.patch.object(app, "get_user", return_value={"status": {}}) as get_user, \
+             mock.patch.object(app, "update_row_stable") as update:
+            result = app.sync_status(dry_run=False)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["contact_lookup_failures"], 0)
+        get_user.assert_called_once_with("token", "ou_active")
+        self.assertEqual(update.call_args.args[1], "rec_active")
+
     def test_send_msg_surfaces_feishu_business_error(self):
         with mock.patch.object(app, "_req", return_value={"code": 230013, "msg": "Bot unavailable"}):
             with self.assertRaisesRegex(app.FeishuAPIError, "230013"):

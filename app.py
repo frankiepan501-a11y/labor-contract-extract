@@ -428,6 +428,9 @@ def sync_status(dry_run=True):
     for r in rows:
         f = r["fields"]
         cur = _txt(f.get("员工状态"))
+        # 离职是终态；历史行可没有飞书账号，不应阻断其他员工同步。
+        if cur == "离职":
+            continue
         name = _txt(f.get("员工姓名"))
         # 1) 离职(通讯录, 最高优先)
         pf = f.get("员工(飞书账号)")
