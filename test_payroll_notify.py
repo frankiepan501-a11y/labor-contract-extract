@@ -4,6 +4,19 @@ import payroll_notify as pn
 
 
 class PayrollNotifyTests(unittest.TestCase):
+    def test_rejects_nonfinancial_numbers_and_invalid_recipient(self):
+        for bad in (True, float('nan'), float('inf')):
+            p = self.payload(); p['employees'][0]['net'] = bad
+            with self.assertRaises(ValueError): pn.notify(p)
+        p = self.payload(); p['recipients'] = [{}]
+        with self.assertRaises(ValueError): pn.notify(p)
+
+    def test_preflight_failure_has_error_code_without_sending(self):
+        with patch.object(pn.hr_readonly, 'feishu_token', side_effect=RuntimeError('remote_api_error:99991663')):
+            result = pn.notify(self.payload())
+        self.assertFalse(result['ok']); self.assertEqual(result['receipts'], [])
+        self.assertIn('99991663', result['error'])
+
     def payload(self):
         return {'month': '2026/09', 'dry_run': False,
                 'employees': [{'name': '甲', 'sheetToken': 'ValidBook123', 'grade': 'D', 'net': 100, 'bonus': 20}]}

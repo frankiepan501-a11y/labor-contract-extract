@@ -5,6 +5,7 @@ UUID protects retries for one hour; later recovery must target failed names only
 """
 import hashlib
 import json
+import math
 import re
 import urllib.error
 
@@ -13,6 +14,17 @@ from notification_title import format_title
 
 RECIPIENTS = ('潘志聪', '高泳昭', '吴晓丹')
 FOLDER = 'https://u1wpma3xuhr.feishu.cn/drive/folder/M926finxFlGWwAdWiuXcgFdRnwh'
+
+
+def _error(exc):
+    if isinstance(exc, urllib.error.HTTPError):
+        try:
+            data = json.loads(exc.read().decode('utf-8'))
+            return f'http={exc.code} feishu_code={data.get("code")}'
+        except Exception:
+            return f'http={exc.code}'
+    code = re.search(r'(?:error:|code=)(\d+)', str(exc))
+    return type(exc).__name__ + (':' + code.group(1) if code else '')
 
 
 def _send(token, open_id, card, key):
@@ -35,6 +47,7 @@ def notify(payload):
     if (not re.fullmatch(r'20\d\d/(0[1-9]|1[0-2])', month)
             or not isinstance(dry_run, bool)
             or not isinstance(wanted, list) or not wanted
+            or not all(isinstance(name, str) for name in wanted)
             or len(wanted) != len(set(wanted)) or set(wanted) - set(RECIPIENTS)
             or not isinstance(employees, list) or not 1 <= len(employees) <= 100):
         raise ValueError('invalid_payroll_notification')
@@ -44,13 +57,17 @@ def notify(payload):
                 or not re.fullmatch(r'[A-Za-z0-9]{6,80}', str(emp.get('sheetToken') or ''))):
             raise ValueError('invalid_payroll_employee')
         for field in ('net', 'bonus'):
-            if not isinstance(emp.get(field), (int, float)):
+            if type(emp.get(field)) not in (int, float) or not math.isfinite(emp[field]):
                 raise ValueError('invalid_payroll_amount')
         if emp.get('grade') not in ('A', 'B', 'C', 'D', 'E', '免考核'):
             raise ValueError('invalid_payroll_grade')
 
-    token = hr_readonly.feishu_token()
-    people = hr_readonly.list_employees(token, user_id_type='open_id', statuses=(2, 4))
+    try:
+        token = hr_readonly.feishu_token()
+        people = hr_readonly.list_employees(token, user_id_type='open_id', statuses=(2, 4))
+    except Exception as exc:
+        return {'ok': False, 'dry_run': dry_run, 'stage': 'HR recipient preflight',
+                'error': _error(exc), 'receipts': []}
     matches = {name: [] for name in wanted}
     for person in people:
         fields = person.get('system_fields') or {}
@@ -84,16 +101,9 @@ def notify(payload):
             try:
                 receipt['message_id'] = _send(token, open_id, card, event_key + ':' + open_id)
                 receipt['status'] = 'sent'
-            except urllib.error.HTTPError as exc:
-                try:
-                    error = json.loads(exc.read().decode('utf-8'))
-                    receipt['error'] = f'http={exc.code} feishu_code={error.get("code")}'
-                except Exception:
-                    receipt['error'] = f'http={exc.code}'
             except Exception as exc:
                 # Only emit an error class and known numeric code, never request headers.
-                code = re.search(r'(?:error:|code=)(\d+)', str(exc))
-                receipt['error'] = type(exc).__name__ + (':' + code.group(1) if code else '')
+                receipt['error'] = _error(exc)
         result['receipts'].append(receipt)
     result['ok'] = all(r['status'] in ('preview', 'sent') for r in result['receipts'])
     return result
