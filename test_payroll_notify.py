@@ -27,6 +27,7 @@ class PayrollNotifyTests(unittest.TestCase):
 
     def test_preflight_no_send_and_same_app_roster(self):
         p = self.payload(); p['dry_run'] = True
+        p['employees'][0]['grade'] = 'KPI豁免'  # actual existing n8n exemption label
         with patch.object(pn.hr_readonly, 'feishu_token', return_value='hr-token'), \
              patch.object(pn.hr_readonly, 'list_employees', return_value=self.people()) as roster, \
              patch.object(pn, '_send') as send:

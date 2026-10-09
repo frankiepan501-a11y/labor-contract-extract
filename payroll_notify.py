@@ -59,7 +59,7 @@ def notify(payload):
         for field in ('net', 'bonus'):
             if type(emp.get(field)) not in (int, float) or not math.isfinite(emp[field]):
                 raise ValueError('invalid_payroll_amount')
-        if emp.get('grade') not in ('A', 'B', 'C', 'D', 'E', '免考核'):
+        if emp.get('grade') not in ('A', 'B', 'C', 'D', 'E', 'KPI豁免'):
             raise ValueError('invalid_payroll_grade')
 
     try:
