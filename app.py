@@ -545,6 +545,7 @@ from fastapi import FastAPI, Header, HTTPException
 from fastapi.responses import JSONResponse
 import hr_callback
 import hr_internal
+import payroll_notify
 api = FastAPI(title="labor-contract-extract")
 
 def _require_internal(authorization: str):
@@ -614,7 +615,7 @@ def start_hr_callback():
     hr_callback.start()
 
 @api.get("/health")
-def health(): return {"ok": True, "v": 15, "last": _LAST,
+def health(): return {"ok": True, "v": 16, "payroll_notify": "hr-assistant-v1", "last": _LAST,
                       "hr_callback": hr_callback.snapshot()}
 
 @api.post("/internal/people/minimal")
@@ -637,6 +638,15 @@ def monthly_attendance_ep(payload: dict, authorization: str = Header(default="")
 def monthly_attendance_notify_ep(payload: dict, authorization: str = Header(default="")):
     _require_internal(authorization)
     result = notify_monthly_attendance(payload)
+    return JSONResponse(result, status_code=200 if result.get("ok") else 502)
+
+@api.post("/internal/payroll/notify", include_in_schema=False)
+def payroll_notify_ep(payload: dict, authorization: str = Header(default="")):
+    _require_internal(authorization)
+    try:
+        result = payroll_notify.notify(payload)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="invalid_payroll_notification")
     return JSONResponse(result, status_code=200 if result.get("ok") else 502)
 
 @api.post("/scan")

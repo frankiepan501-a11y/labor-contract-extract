@@ -6,5 +6,6 @@ COPY app.py .
 COPY hr_callback.py .
 COPY hr_internal.py .
 COPY hr_readonly.py .
+COPY payroll_notify.py notification_title.py ./
 ENV PORT=8080
 CMD ["sh", "-c", "uvicorn app:api --host 0.0.0.0 --port ${PORT}"]

@@ -3,6 +3,7 @@
 人事行政专属后端。云端服务负责劳动合同状态同步和到期提醒；本机 `hr_local_bridge.py` 负责“人事行政助手”的卡片回调、`#合同识别` 和人事只读查询。云端 OCR 端点已停用。
 
 ## 端点
+- `POST /internal/payroll/notify` — 受内部口令保护，已生成亚马逊工资的最小摘要通知；只使用人事行政助手，返回逐人回执，默认dry_run。范围、重试限制与修复依据见 [工资通知修复](docs/payroll-notify-repair-20261009.md)。
 - `GET /health`
 - `POST /sync-status?dry_run=true` — 只预览员工状态变化
 - `POST /remind?dry_run=true` — 只预览到期提醒与收件人解析，不发消息
